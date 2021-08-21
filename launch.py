@@ -2,23 +2,8 @@ import math
 import time
 import krpc
 import launch_parameters
+import telemetry
 import pid
-
-def telemetry(conn, vessel, srf_frame):
-    """
-    Function sets up streams for telemetry data from KSP
-    :param conn: krpc server connection object
-    :param vessel: active vessel
-    :param srf_frame: surface reference frame
-    :return: telemetry object
-    """
-    ut = conn.add_stream(getattr, conn.space_center, 'ut')
-    altitude = conn.add_stream(getattr, vessel.flight(), 'mean_altitude')
-    apoapsis = conn.add_stream(getattr, vessel.orbit, 'apoapsis_altitude')
-    srf_speed = conn.add_stream(getattr, vessel.flight(srf_frame), 'speed')
-    dynamic_pressure = conn.add_stream(getattr, vessel.flight(srf_frame), 'dynamic_pressure')
-    stage_resources = vessel.resources_in_decouple_stage(stage=vessel.control.current_stage - 1, cumulative=False)
-    return object
 
 def main():
     """
@@ -31,7 +16,7 @@ def main():
 
     launch_params = launch_parameters.LaunchParameters()
 
-    telemetry_streams = telemetry(conn, vessel, srf_frame)
+    telemetry_streams = telemetry.Telemetry(conn, vessel, srf_frame)
     ascent(conn, launch_params, telemetry_streams)
 
 def ascent(connection, lp, ts):
@@ -50,7 +35,7 @@ def ascent(connection, lp, ts):
     # Countdown
     # =====================
 
-    text_panel = panel_setup()
+    text_panel = panel_setup(conn)
     panel_write(text_panel, "Countdown")
     time.sleep(1)
     panel_write(text_panel, "3")
@@ -66,41 +51,153 @@ def ascent(connection, lp, ts):
 
     panel_write(text_panel, "Lift off!")
     vessel.control.throttle = 1.0
+    time.sleep(0.5)
     vessel.auto_pilot.engage()
+    vessel.auto_pilot.target_pitch_and_heading(90, 90)  # change arguments to launch params
     vessel.control.activate_next_stage()
-    vessel.auto_pilot.target_pitch_and_heading(90, 90) # change arguments to launch params
 
     # =====================
     # Gravity turn loop
     # =====================
-    if (launch_params.turn_start_altitude <
+    while telemetry_streams.altitude() <= launch_params.turn_start_altitude:
+        vessel.control.throttle = 1.0
+
+    while (launch_params.turn_start_altitude <
             telemetry_streams.altitude() < launch_params.turn_end_altitude):
-        gravity_turn(conn, telemetry_streams, launch_params)
+        gravity_turn(conn, telemetry_streams, launch_params, text_panel)
+        autostage(conn, telemetry_streams, launch_params, text_panel)
+        time.sleep(0.1)
 
+    panel_write(text_panel, "Target apoapsis reached")
+    vessel.control.throttle = 0.0
 
-def gravity_turn(connection, ts, lp):
+    # =====================
+    # Coasting out of atmosphere
+    # =====================
+    panel_write(text_panel, "Coasting out of the atmosphere")
+    while telemetry_streams.altitude() < 70000:
+        pass
+
+    # =====================
+    # Circularization
+    # =====================
+    circularization(conn, telemetry_streams, text_panel)
+    execute_node(conn, telemetry_streams, launch_params, text_panel)
+    vessel.auto_pilot.disengage()
+    panel_write(text_panel, "Target orbit reached")
+
+def gravity_turn(connection, ts, lp, tp):
     conn = connection
     telemetry_streams = ts
     launch_params = lp
+    text_panel = tp
     vessel = conn.space_center.active_vessel
-    text_panel = panel_setup()
+
     panel_write(text_panel, "Executing gravity turn")
+
     turn_range_covered = ((telemetry_streams.altitude() -
                            launch_params.turn_start_altitude) /
                           (launch_params.turn_end_altitude -
                            launch_params.turn_start_altitude))
     new_turn_angle = turn_range_covered * 90
-    vessel.auto_pilot.target_pitch(90 - new_turn_angle)
+    vessel.auto_pilot.target_pitch_and_heading(90 - new_turn_angle, 90)
 
-def autostage():
-    
+def autostage(connection, ts, lp, tp):
+    conn = connection
+    telemetry_streams = ts
+    launch_params = lp
+    vessel = conn.space_center.active_vessel
+    text_panel = tp
 
-def panel_setup():
+    fuel_types = ('LiquidFuel', 'SolidFuel')
+    resources = vessel.resources_in_decouple_stage(
+        vessel.control.current_stage - 1, cumulative=False)
+    no_fuel_stage = True
+
+    if vessel.control.current_stage <= 0:
+        return
+    for fuel in fuel_types:
+        if resources.max(fuel) > 0 and resources.amount(fuel) == 0:
+            vessel.control.activate_next_stage()
+            panel_write(text_panel, "Stage separation")
+            return
+        if resources.has_resource(fuel):
+            no_fuel_stage = False
+    if no_fuel_stage:
+        vessel.control.activate_next_stage()
+        panel_write(text_panel, "Stage separation")
+
+def circularization(connection, ts, tp):
+    conn = connection
+    telemetry_streams = ts
+    vessel = conn.space_center.active_vessel
+    text_panel = tp
+    panel_write(text_panel, "Planning circularization burn")
+
+    mu = vessel.orbit.body.gravitational_parameter
+    ap = vessel.orbit.apoapsis
+    a1 = vessel.orbit.semi_major_axis
+    a2 = ap
+    v1 = math.sqrt(mu * ((2. / ap) - (1. / a1)))
+    v2 = math.sqrt(mu * ((2. / ap) - (1. / a2)))
+    delta_v = v2 - v1
+    vessel.control.add_node(
+        telemetry_streams.ut() + vessel.orbit.time_to_apoapsis, prograde=delta_v)
+
+def execute_node(connection, ts, lp, tp):
+    conn = connection
+    telemetry_streams = ts
+    text_panel = tp
+    launch_params = lp
+    vessel = conn.space_center.active_vessel
+    node = vessel.control.nodes[0]
+    delta_v = node.delta_v
+
+    # Calculate burn time: rocket equation
+    force = vessel.available_thrust
+    isp = vessel.specific_impulse * 9.81
+    m0 = vessel.mass
+    m1 = m0 / math.exp(delta_v / isp)
+    flow_rate = force / isp
+    burn_time = (m0 - m1) / flow_rate
+
+    # Orient vessel
+    vessel.control.rcs = True
+    vessel.auto_pilot.reference_frame = node.reference_frame
+    vessel.auto_pilot.target_direction = (0, 1, 0)
+    vessel.auto_pilot.wait()
+
+    # Wait until burn
+    panel_write(text_panel, "Waiting until circularization burn")
+    burn_ut = telemetry_streams.ut() + vessel.orbit.time_to_apoapsis - (burn_time / 2.)
+    lead_time = 5
+
+    # Execute burn
+    while telemetry_streams.time_to_apoapsis() - (burn_time / 2.) > 0:
+        autostage(conn, telemetry_streams, launch_params, text_panel)
+        pass
+    panel_write(text_panel, "Executing node")
+    vessel.control.throttle = 1.0
+    remaining_burn = conn.add_stream(node.remaining_burn_vector, node.reference_frame)
+    # time.sleep(burn_time)
+    while node.remaining_delta_v > 10:
+        autostage(conn, telemetry_streams, launch_params, text_panel)
+        time.sleep(0.1)
+    vessel.control.throttle = 0.25
+    while node.remaining_delta_v > 1:
+        pass
+    # Disengage throttle, rcs and remove node
+    vessel.control.throttle = 0.0
+    node.remove()
+    vessel.control.rcs = False
+
+def panel_setup(connection):
     """
     Function creates a new panel to left of screen
     then enables ability to add text
     :return text object
     """
+    conn = connection
     canvas = conn.ui.stock_canvas
     screen_size = canvas.rect_transform.size
     panel = canvas.add_panel()
@@ -125,3 +222,6 @@ def panel_write(text_panel, message):
     """
 
     text_panel.content = message
+
+if __name__ == "__main__":
+    main()

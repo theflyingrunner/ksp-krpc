@@ -72,3 +72,6 @@ class PID:
     def setKd(self, derivative_gain):
         """Set derivative gain"""
         self.Kd = derivative_gain
+
+    def setClamp(self, clamping_value):
+        self.clamp = clamping_value
