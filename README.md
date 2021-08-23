@@ -13,3 +13,6 @@ booster landings and more.
 1. Ensure you have KSP version 1.7.3 (newer versions are not currently supported)
 2. Download the kRPC mod and read relevant documentation https://krpc.github.io/krpc/getting-started.html
 3. Download Python and relevant kRPC library (can download using pip)
+4. To launch a rocket into orbit, simply load any stock rocket (PT Series Munsplorer currently tested) and run launch.py
+5. If you notice any bugs, please report them. In addition, if you have ideas for improvement and would like to contribute, 
+   feel free to open a pull request.
