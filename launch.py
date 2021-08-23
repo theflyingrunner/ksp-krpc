@@ -1,3 +1,13 @@
+"""
+Launch code intended for ascent into orbit. This script should work with any
+rocket that has the required delta v to establish orbit. The simulation is intended
+for use on Kerbin in Kerbal Space Program, but the launch parameters can be modified
+for use on a simulation of Earth. This script utilizes a PID controller to control
+thrust by limiting the maximum allowable dynamic pressure. Note that the script uses
+the kRPC library and the launch_parameters, telemetry, and pid Python files. Please
+use these in your own versions of the script.
+"""
+
 import math
 import time
 import krpc
@@ -15,26 +25,33 @@ def main():
     srf_frame = vessel.orbit.body.reference_frame
 
     launch_params = launch_parameters.LaunchParameters()
-
     telemetry_streams = telemetry.Telemetry(conn, vessel, srf_frame)
+
     ascent(conn, launch_params, telemetry_streams)
 
 def ascent(connection, lp, ts):
     """
-
-    :param connection:
-    :param lp:
-    :param ts:
+    Function serves as main ascent loop. Function executes gravity turn, orbit
+    circularization, and node execution. In addition, the function also sets up the
+    PID controller which controls the thrust by limiting maximum allowable dynamic
+    pressure
+    :param connection: krpc connection
+    :param lp: launch parameters
+    :param ts: telemetry streams
     """
     conn = connection
     launch_params = lp
     telemetry_streams = ts
     vessel = connection.space_center.active_vessel
     srf_frame = vessel.orbit.body.reference_frame
+    # PID controller setup
+    thrust_pid = pid.PID(0.001, 0.0001, 0.01)
+    thrust_pid.setClamp(launch_params.q_allow)
+    thrust_pid.setTarget(launch_params.q_allow)
+
     # =====================
     # Countdown
     # =====================
-
     text_panel = panel_setup(conn)
     panel_write(text_panel, "Countdown")
     time.sleep(1)
@@ -48,7 +65,6 @@ def ascent(connection, lp, ts):
     # =====================
     # Activate the first stage
     # =====================
-
     panel_write(text_panel, "Lift off!")
     vessel.control.throttle = 1.0
     time.sleep(0.5)
@@ -66,6 +82,7 @@ def ascent(connection, lp, ts):
             telemetry_streams.altitude() < launch_params.turn_end_altitude):
         gravity_turn(conn, telemetry_streams, launch_params, text_panel)
         autostage(conn, telemetry_streams, launch_params, text_panel)
+        vessel.control.throttle = thrust_pid.update(telemetry_streams.dynamic_pressure())
         time.sleep(0.1)
 
     panel_write(text_panel, "Target apoapsis reached")
@@ -75,6 +92,7 @@ def ascent(connection, lp, ts):
     # Coasting out of atmosphere
     # =====================
     panel_write(text_panel, "Coasting out of the atmosphere")
+    # Atmosphere of Kerbin extends till ~70000 meters altitude
     while telemetry_streams.altitude() < 70000:
         pass
 
@@ -83,10 +101,24 @@ def ascent(connection, lp, ts):
     # =====================
     circularization(conn, telemetry_streams, text_panel)
     execute_node(conn, telemetry_streams, launch_params, text_panel)
+
+    # =====================
+    # Final ascent closing procedures
+    # =====================
     vessel.auto_pilot.disengage()
     panel_write(text_panel, "Target orbit reached")
 
 def gravity_turn(connection, ts, lp, tp):
+    """
+    Function executes gravity turn by pitching 90° eastward based on the progress
+    of turn range covered. The turn range can be modified by changing the turn
+    start and end altitudes in launch_parameters
+    :param connection: krpc connection
+    :param ts: telemetry streams
+    :param lp: launch parameters
+    :param tp: text panel
+    :return: N/A
+    """
     conn = connection
     telemetry_streams = ts
     launch_params = lp
@@ -103,6 +135,16 @@ def gravity_turn(connection, ts, lp, tp):
     vessel.auto_pilot.target_pitch_and_heading(90 - new_turn_angle, 90)
 
 def autostage(connection, ts, lp, tp):
+    """
+    Function checks if a stage has fuel and activates next stage. This function
+    will do nothing if this is the last stage. In addition, if current is fuel-less
+    (such as an in-between stage), it will activate next stage.
+    :param connection: krpc connection
+    :param ts: telemetry streams
+    :param lp: launch parameters
+    :param tp: text panel
+    :return: N/A
+    """
     conn = connection
     telemetry_streams = ts
     launch_params = lp
@@ -128,6 +170,15 @@ def autostage(connection, ts, lp, tp):
         panel_write(text_panel, "Stage separation")
 
 def circularization(connection, ts, tp):
+    """
+    Function calculates required delta v for orbit circularization using the
+    vis-viva equation. The function then adds a node in KSP for subsequent
+    burn time calculation
+    :param connection: krpc connection
+    :param ts: telemetry streams
+    :param tp: text panel
+    :return: N/A
+    """
     conn = connection
     telemetry_streams = ts
     vessel = conn.space_center.active_vessel
@@ -145,6 +196,17 @@ def circularization(connection, ts, tp):
         telemetry_streams.ut() + vessel.orbit.time_to_apoapsis, prograde=delta_v)
 
 def execute_node(connection, ts, lp, tp):
+    """
+    Function executes circularization node by
+    1. calculating burn time using the rocket equation
+    2. orienting vehicle to node vector
+    3. executing node such that apoapsis is achieved at the midpoint of burn time
+    :param connection: krpc connection
+    :param ts: telemetry streams
+    :param lp: launch parameters
+    :param tp: text panel
+    :return: N/A
+    """
     conn = connection
     telemetry_streams = ts
     text_panel = tp
@@ -223,5 +285,6 @@ def panel_write(text_panel, message):
 
     text_panel.content = message
 
+# Executes main function
 if __name__ == "__main__":
     main()

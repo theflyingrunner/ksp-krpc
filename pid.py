@@ -1,4 +1,4 @@
-# ========================
+"""
 # PID Controller
 # A simple Proportional-Integral-Derivative controller
 #
@@ -6,8 +6,7 @@
 # Date: August 18th, 2021
 # Email: sbhoopat@purdue.edu
 # Version: 1.2
-# ========================
-
+"""
 import time
 
 class PID:
